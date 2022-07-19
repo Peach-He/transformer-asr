@@ -20,7 +20,7 @@ from torch.utils.data import (
 )
 import numpy as np
 from typing import List
-from data.dataset import DynamicItemDataset
+from dataio.dataset import DynamicItemDataset
 from collections import Counter
 from scipy.stats import lognorm
 

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from typing import Optional
-import speechbrain as sb
 import warnings
 
 

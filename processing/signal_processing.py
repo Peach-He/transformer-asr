@@ -1,3 +1,13 @@
+"""
+Low level signal processing utilities
+
+Authors
+ * Peter Plantinga 2020
+ * Francois Grondin 2020
+ * William Aris 2020
+ * Samuele Cornell 2020
+ * Sarthak Yadav 2022
+"""
 import torch
 import math
 from packaging import version

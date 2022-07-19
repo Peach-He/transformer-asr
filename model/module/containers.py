@@ -4,7 +4,7 @@ import logging
 import operator
 import functools
 from model.module.linear import Linear
-from speechbrain.utils.callchains import lengths_arg_exists
+from utils.callchains import lengths_arg_exists
 
 logger = logging.getLogger(__name__)
 

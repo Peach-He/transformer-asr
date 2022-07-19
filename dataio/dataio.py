@@ -1,14 +1,3 @@
-"""
-Data reading and writing.
-
-Authors
- * Mirco Ravanelli 2020
- * Aku Rouhe 2020
- * Ju-Chieh Chou 2020
- * Samuele Cornell 2020
- * Abdel HEBA 2020
-"""
-
 import os
 import torch
 import logging

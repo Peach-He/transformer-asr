@@ -3,8 +3,8 @@ import torch
 import torchaudio
 
 from utils.utils import is_main_process, ddp_barrier
-from speechbrain.utils.data_utils import download_file
-from data.audio.processing.speech_augmentation import (
+from utils.data_utils import download_file
+from processing.speech_augmentation import (
     SpeedPerturb,
     DropFreq,
     DropChunk,
@@ -12,7 +12,7 @@ from data.audio.processing.speech_augmentation import (
     AddNoise,
     AddReverb,
 )
-from speechbrain.utils.torch_audio_backend import check_torchaudio_backend
+from utils.torch_audio_backend import check_torchaudio_backend
 
 check_torchaudio_backend()
 

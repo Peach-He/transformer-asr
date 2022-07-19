@@ -1,5 +1,5 @@
 import torch
-from data.audio.processing.features import (
+from processing.features import (
     STFT,
     spectral_magnitude,
     Filterbank,

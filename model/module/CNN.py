@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 from typing import Tuple
-from data.audio.processing.signal_processing import (
+from processing.signal_processing import (
     gabor_impulse_response,
     gabor_impulse_response_legacy_complex,
 )

@@ -4,9 +4,9 @@ import torch.nn as nn
 from typing import Optional
 
 
-from .Conformer import ConformerEncoder
-from speechbrain.nnet.activations import Swish
-from speechbrain.nnet.attention import RelPosEncXL
+from model.Conformer import ConformerEncoder
+from model.module.activations import Swish
+from model.module.attention import RelPosEncXL
 
 
 class TransformerInterface(nn.Module):

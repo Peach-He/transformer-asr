@@ -7,7 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from utils.parse_args import parse_arguments
 from utils.load_hparams import load_hyperpyyaml
-# import utils.distributed as dist
+import utils.distributed as dist
 from utils.utils import run_on_main, is_main_process, check_gradients, update_average
 from model.transformer import Transformer
 from data.dataloader import dataio_prepare, make_dataloader
@@ -136,8 +136,8 @@ def main():
         world_size = 1
     
     train_data, valid_data, test_datasets, tokenizer = dataio_prepare(hparams)
-    train_dataloader = make_dataloader(train_data, 'train', **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
-    valid_dataloader = make_dataloader(valid_data, 'valid', **hparams["valid_dataloader_opts"])
+    train_dataloader = make_dataloader(train_data, 'train', world_size>1, **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
+    valid_dataloader = make_dataloader(valid_data, 'valid', world_size>1, **hparams["valid_dataloader_opts"])
 
 
     run_on_main(hparams["pretrainer"].collect_files)

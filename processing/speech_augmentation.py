@@ -16,9 +16,9 @@ Authors
 import math
 import torch
 import torch.nn.functional as F
-from speechbrain.dataio.legacy import ExtendedCSVDataset
-from speechbrain.dataio.dataloader import make_dataloader
-from speechbrain.processing.signal_processing import (
+from dataio.legacy import ExtendedCSVDataset
+from dataio.dataloader import make_dataloader
+from processing.signal_processing import (
     compute_amplitude,
     dB_to_amplitude,
     convolve1d,

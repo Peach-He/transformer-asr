@@ -1,3 +1,10 @@
+"""Dataset examples for loading individual data points
+
+Authors
+  * Aku Rouhe 2020
+  * Samuele Cornell 2020
+"""
+
 import copy
 import contextlib
 from types import MethodType

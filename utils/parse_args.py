@@ -58,7 +58,7 @@ def parse_arguments():
     parser.add_argument(
         "--distributed_backend",
         type=str,
-        default="ccl",
+        default="gloo",
         help="One of {nccl, gloo, mpi}",
     )
     parser.add_argument(
