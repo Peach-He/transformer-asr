@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 def make_dataloader(dataset, stage, dist, looped_nominal_epoch=None, **loader_kwargs):
     if stage == 'train':
         loader_kwargs = train_loader_specifics(dataset, dist, loader_kwargs)
-        print(f"loader: {loader_kwargs}")
 
     # PaddedBatch as default collation for DynamicItemDataset
     if "collate_fn" not in loader_kwargs and isinstance(
@@ -55,7 +54,6 @@ def make_dataloader(dataset, stage, dist, looped_nominal_epoch=None, **loader_kw
         dataloader = SaveableDataLoader(dataset, **loader_kwargs)
     if looped_nominal_epoch is not None:
         dataloader = LoopedLoader(dataloader, looped_nominal_epoch)
-
     return dataloader
 
 
@@ -201,9 +199,6 @@ def dataio_prepare(hparams):
         datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"],
     )
 
-    # 5. If Dynamic Batching is used, we instantiate the needed samplers.
-    train_batch_sampler = None
-    valid_batch_sampler = None
     ########################remove batch sampler
     return (
         train_data,
