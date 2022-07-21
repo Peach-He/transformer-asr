@@ -33,7 +33,6 @@ from torch.utils.data import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from hyperpyyaml import resolve_references
 from speechbrain.utils.distributed import run_on_main
-from speechbrain.dataio.dataloader import LoopedLoader
 from speechbrain.dataio.dataloader import SaveableDataLoader
 from speechbrain.dataio.sampler import DistributedSamplerWrapper
 from speechbrain.dataio.sampler import ReproducibleRandomSampler
@@ -110,13 +109,6 @@ def create_experiment_directory(
             logger.info("Beginning experiment!")
             logger.info(f"Experiment folder: {experiment_directory}")
 
-            # Save system description:
-            if save_env_desc:
-                description_str = sb.utils.logger.get_environment_description()
-                with open(
-                    os.path.join(experiment_directory, "env.log"), "w"
-                ) as fo:
-                    fo.write(description_str)
     finally:
         # wait for main_process if ddp is used
         sb.utils.distributed.ddp_barrier()
@@ -708,7 +700,6 @@ class Brain:
             and ckpt_prefix is not None
             and (
                 isinstance(dataloader, SaveableDataLoader)
-                or isinstance(dataloader, LoopedLoader)
             )
         ):
             ckpt_key = ckpt_prefix + stage.name
@@ -971,48 +962,38 @@ class Brain:
         # Time since last intra-epoch checkpoint
         last_ckpt_time = time.time()
 
-        with tqdm(
-            train_set,
-            initial=self.step,
-            dynamic_ncols=True,
-            disable=not enable,
-        ) as t:
-            for batch in t:
-                if self._optimizer_step_limit_exceeded:
-                    logger.info("Train iteration limit exceeded")
-                    break
-                self.step += 1
-                loss = self.fit_batch(batch)
-                self.avg_train_loss = self.update_average(
-                    loss, self.avg_train_loss
-                )
-                print(f"step: {self.step}, loss: {loss}, avg_loss: {self.avg_train_loss}, lr: {self.hparams.noam_annealing.current_lr}")
-                t.set_postfix(train_loss=self.avg_train_loss)
-
-                # Profile only if desired (steps allow the profiler to know when all is warmed up)
-                if self.profiler is not None:
-                    if self.profiler.record_steps:
-                        self.profiler.step()
-
-                # Debug mode only runs a few batches
-                if self.debug and self.step == self.debug_batches:
-                    break
-
-                if (
-                    self.checkpointer is not None
-                    and self.ckpt_interval_minutes > 0
-                    and time.time() - last_ckpt_time
-                    >= self.ckpt_interval_minutes * 60.0
-                ):
-                    # This should not use run_on_main, because that
-                    # includes a DDP barrier. That eventually leads to a
-                    # crash when the processes'
-                    # time.time() - last_ckpt_time differ and some
-                    # processes enter this block while others don't,
-                    # missing the barrier.
-                    if sb.utils.distributed.if_main_process():
-                        self._save_intra_epoch_ckpt()
-                    last_ckpt_time = time.time()
+        for batch in train_set:
+            if self._optimizer_step_limit_exceeded:
+                logger.info("Train iteration limit exceeded")
+                break
+            self.step += 1
+            loss = self.fit_batch(batch)
+            self.avg_train_loss = self.update_average(
+                loss, self.avg_train_loss
+            )
+            print(f"step: {self.step}, loss: {loss}, avg_loss: {self.avg_train_loss}, lr: {self.hparams.noam_annealing.current_lr}")
+            # Profile only if desired (steps allow the profiler to know when all is warmed up)
+            if self.profiler is not None:
+                if self.profiler.record_steps:
+                    self.profiler.step()
+            # Debug mode only runs a few batches
+            if self.debug and self.step == self.debug_batches:
+                break
+            if (
+                self.checkpointer is not None
+                and self.ckpt_interval_minutes > 0
+                and time.time() - last_ckpt_time
+                >= self.ckpt_interval_minutes * 60.0
+            ):
+                # This should not use run_on_main, because that
+                # includes a DDP barrier. That eventually leads to a
+                # crash when the processes'
+                # time.time() - last_ckpt_time differ and some
+                # processes enter this block while others don't,
+                # missing the barrier.
+                if sb.utils.distributed.if_main_process():
+                    self._save_intra_epoch_ckpt()
+                last_ckpt_time = time.time()
 
         # Run train "on_stage_end" on all processes
         self.on_stage_end(Stage.TRAIN, self.avg_train_loss, epoch)
@@ -1026,9 +1007,7 @@ class Brain:
             self.modules.eval()
             avg_valid_loss = 0.0
             with torch.no_grad():
-                for batch in tqdm(
-                    valid_set, dynamic_ncols=True, disable=not enable
-                ):
+                for batch in valid_set:
                     self.step += 1
                     loss = self.evaluate_batch(batch, stage=Stage.VALID)
                     avg_valid_loss = self.update_average(loss, avg_valid_loss)
@@ -1101,14 +1080,12 @@ class Brain:
 
         if not (
             isinstance(train_set, DataLoader)
-            or isinstance(train_set, LoopedLoader)
         ):
             train_set = self.make_dataloader(
                 train_set, stage=sb.Stage.TRAIN, **train_loader_kwargs
             )
         if valid_set is not None and not (
             isinstance(valid_set, DataLoader)
-            or isinstance(valid_set, LoopedLoader)
         ):
             valid_set = self.make_dataloader(
                 valid_set,
@@ -1228,7 +1205,6 @@ class Brain:
 
         if not (
             isinstance(test_set, DataLoader)
-            or isinstance(test_set, LoopedLoader)
         ):
             test_loader_kwargs["ckpt_prefix"] = None
             test_set = self.make_dataloader(

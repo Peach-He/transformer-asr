@@ -10,8 +10,6 @@ from . import processing  # noqa
 from . import tokenizers  # noqa
 from . import utils  # noqa
 
-with open(os.path.join(os.path.dirname(__file__), "version.txt")) as f:
-    version = f.read().strip()
 
 __all__ = [
     "Stage",
@@ -19,5 +17,3 @@ __all__ = [
     "create_experiment_directory",
     "parse_arguments",
 ]
-
-__version__ = version

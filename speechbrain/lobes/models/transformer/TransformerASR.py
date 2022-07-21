@@ -15,7 +15,6 @@ from speechbrain.lobes.models.transformer.Transformer import (
     get_key_padding_mask,
     NormalizedEmbedding,
 )
-from speechbrain.nnet.activations import Swish
 from speechbrain.dataio.dataio import length_to_mask
 
 
@@ -100,7 +99,6 @@ class TransformerASR(TransformerInterface):
         kernel_size: Optional[int] = 31,
         bias: Optional[bool] = True,
         encoder_module: Optional[str] = "transformer",
-        conformer_activation: Optional[nn.Module] = Swish,
         attention_type: Optional[str] = "regularMHA",
         max_length: Optional[int] = 2500,
         causal: Optional[bool] = True,
@@ -118,7 +116,6 @@ class TransformerASR(TransformerInterface):
             kernel_size=kernel_size,
             bias=bias,
             encoder_module=encoder_module,
-            conformer_activation=conformer_activation,
             attention_type=attention_type,
             max_length=max_length,
             causal=causal,
@@ -319,38 +316,3 @@ class TransformerASR(TransformerInterface):
         for p in self.parameters():
             if p.dim() > 1:
                 torch.nn.init.xavier_normal_(p)
-
-
-class EncoderWrapper(nn.Module):
-    """This is a wrapper of any ASR transformer encoder. By default, the
-    TransformerASR .forward() function encodes and decodes. With this wrapper
-    the .forward() function becomes .encode() only.
-
-    Important: The TransformerASR class must contain a .encode() function.
-
-    Arguments
-    ----------
-    transformer : sb.lobes.models.TransformerInterface
-        A Transformer instance that contains a .encode() function.
-
-    Example
-    -------
-    >>> src = torch.rand([8, 120, 512])
-    >>> tgt = torch.randint(0, 720, [8, 120])
-    >>> net = TransformerASR(
-    ...     720, 512, 512, 8, 1, 1, 1024, activation=torch.nn.GELU
-    ... )
-    >>> encoder = EncoderWrapper(net)
-    >>> enc_out = encoder(src)
-    >>> enc_out.shape
-    torch.Size([8, 120, 512])
-    """
-
-    def __init__(self, transformer, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.transformer = transformer
-
-    def forward(self, x, wav_lens=None):
-        """ Processes the input tensor x and returns an output tensor."""
-        x = self.transformer.encode(x, wav_lens)
-        return x

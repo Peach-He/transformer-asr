@@ -10,9 +10,6 @@ import torch.nn as nn
 import speechbrain as sb
 from typing import Optional
 
-
-from .Conformer import ConformerEncoder
-from speechbrain.nnet.activations import Swish
 from speechbrain.nnet.attention import RelPosEncXL
 
 
@@ -95,7 +92,6 @@ class TransformerInterface(nn.Module):
         kernel_size: Optional[int] = 31,
         bias: Optional[bool] = True,
         encoder_module: Optional[str] = "transformer",
-        conformer_activation: Optional[nn.Module] = Swish,
         attention_type: Optional[str] = "regularMHA",
         max_length: Optional[int] = 2500,
         causal: Optional[bool] = False,
@@ -137,40 +133,19 @@ class TransformerInterface(nn.Module):
         if num_encoder_layers > 0:
             if custom_src_module is not None:
                 self.custom_src_module = custom_src_module(d_model)
-            if encoder_module == "transformer":
-                self.encoder = TransformerEncoder(
-                    nhead=nhead,
-                    num_layers=num_encoder_layers,
-                    d_ffn=d_ffn,
-                    d_model=d_model,
-                    dropout=dropout,
-                    activation=activation,
-                    normalize_before=normalize_before,
-                    causal=self.causal,
-                    attention_type=self.attention_type,
-                    kdim=self.encoder_kdim,
-                    vdim=self.encoder_vdim,
-                )
-            elif encoder_module == "conformer":
-                self.encoder = ConformerEncoder(
-                    nhead=nhead,
-                    num_layers=num_encoder_layers,
-                    d_ffn=d_ffn,
-                    d_model=d_model,
-                    dropout=dropout,
-                    activation=conformer_activation,
-                    kernel_size=kernel_size,
-                    bias=bias,
-                    causal=self.causal,
-                    attention_type=self.attention_type,
-                )
-                assert (
-                    normalize_before
-                ), "normalize_before must be True for Conformer"
-
-                assert (
-                    conformer_activation is not None
-                ), "conformer_activation must not be None"
+            self.encoder = TransformerEncoder(
+                nhead=nhead,
+                num_layers=num_encoder_layers,
+                d_ffn=d_ffn,
+                d_model=d_model,
+                dropout=dropout,
+                activation=activation,
+                normalize_before=normalize_before,
+                causal=self.causal,
+                attention_type=self.attention_type,
+                kdim=self.encoder_kdim,
+                vdim=self.encoder_vdim,
+            )
 
         # initialize the decoder
         if num_decoder_layers > 0:

@@ -1,47 +1,16 @@
-"""PyTorch compatible DataLoaders
-
-Essentially we extend PyTorch DataLoader by adding the ability to save the
-data loading state, so that a checkpoint may be saved in the middle of an
-epoch.
-
-Example
--------
->>> import torch
->>> from speechbrain.utils.checkpoints import Checkpointer
->>> # An example "dataset" and its loader
->>> dataset = torch.randn(10, 1)
->>> dataloader = SaveableDataLoader(dataset, num_workers = 3)
->>> # Setup the checkpointer:
->>> tmpdir = getfixture('tmpdir')
->>> checkpointer = Checkpointer(tmpdir, {"dataloader": dataloader})
->>> # Iterate:
->>> for i, data_point in enumerate(dataloader):
-...     # Here you would process the data:
-...     rainfall_amount_prediction = data_point * 4.
-...     # Now, imagine the experiment gets killed on the fifth batch:
-...     if i == 4:
-...         break
-...     # Luckily, you had just saved a checkpoint:
-...     if i == 3:
-...         _ = checkpointer.save_checkpoint(end_of_epoch = False)
->>> # So when you restart the experiment:
->>> new_dataloader = SaveableDataLoader(dataset, num_workers = 3)
->>> new_checkpointer = Checkpointer(tmpdir, {"dataloader": new_dataloader})
->>> _ = new_checkpointer.recover_if_possible()
->>> # The dataloader fast-forwards to the position where we left off:
->>> assert next(iter(new_dataloader)) == dataset[4]
-
-Authors:
-  * Aku Rouhe 2020
-"""
+import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import _BaseDataLoaderIter
 import logging
+from pathlib import Path
 import warnings
 import functools
+from torch.utils.data import DistributedSampler
 from speechbrain.dataio.batch import PaddedBatch
 from speechbrain.dataio.dataset import DynamicItemDataset
+from speechbrain.dataio.sampler import ReproducibleRandomSampler
+from speechbrain.dataio.sampler import DistributedSamplerWrapper
 from speechbrain.dataio.sampler import ReproducibleRandomSampler
 from speechbrain.utils.checkpoints import (
     register_checkpoint_hooks,
@@ -52,43 +21,10 @@ from speechbrain.utils.checkpoints import (
 
 logger = logging.getLogger(__name__)
 
+def make_dataloader(dataset, stage, dist, **loader_kwargs):
+    if stage == 'train':
+        loader_kwargs = train_loader_specifics(dataset, dist, loader_kwargs)
 
-def make_dataloader(dataset, **loader_kwargs):
-    """Makes a basic DataLoader with SpeechBrain defaults.
-
-    For DynamicItemDatasets (which return dicts), use
-    PaddedBatch as the default collate_fn.
-
-    Shuffling gets implemented by ReproducibleRandomSampler.
-
-    If the Dataset is not an IterableDataset, the DataLoader
-    is a SaveableDataLoader.
-
-    If the Dataset is a webdataset.dataset.Composable, set default
-    batch_size = None.
-
-    Can also loop over the underlying dataloader continuously,
-    and stop iterations at nominal epoch lengths.
-
-    Arguments
-    ---------
-    dataset : Dataset
-        The dataset to make a DataLoader for.
-    looped_nominal_epoch : None, int
-        If an integer is given, loop the underlying DataLoader infinitely and
-        set a nominal epoch length in batches (or whatever the DataLoader
-        yields).
-    **loader_kwargs : dict
-        Keyword args to DataLoader, see PyTorch DataLoader for
-        options.
-
-    Returns
-    -------
-    DataLoader
-        If looped_nominal_epoch is None
-    LoopedLoader
-        If looped_nominal_epoch is not None
-    """
     # PaddedBatch as default collation for DynamicItemDataset
     if "collate_fn" not in loader_kwargs and isinstance(
         dataset, DynamicItemDataset
@@ -109,7 +45,6 @@ def make_dataloader(dataset, **loader_kwargs):
         # However, this del doesn't touch those because loader_kwargs comes
         # from a **kwargs dict.
         del loader_kwargs["shuffle"]
-
     # Create the loader
     if isinstance(dataset, IterableDataset):
         dataloader = DataLoader(dataset, **loader_kwargs)
@@ -118,54 +53,63 @@ def make_dataloader(dataset, **loader_kwargs):
     return dataloader
 
 
-# We essentially want to make the DataLoader iterators able to skip ahead
-# after checkpoint recovery
-# This should be handled by the DataLoader iterators' base class.
-# To make the implementation here a little more maintainable
-# we decide to patch some PyTorch functionality
+def train_loader_specifics(dataset, distributed_launch, loader_kwargs):
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    sampler = loader_kwargs.get("sampler", None)
+    # Shuffling should really only matter for the train stage. Shuffling
+    # will also lead to more padding in batches if the order was otherwise
+    # sorted by length.
+    shuffle = loader_kwargs.get("shuffle", False)
+    if shuffle and not distributed_launch:
+        if sampler is not None:
+            raise ValueError(
+                "Cannot specify both shuffle=True"
+                "and a sampler in loader_kwargs"
+            )
+        sampler = ReproducibleRandomSampler(dataset)
+        train_sampler = sampler
+        loader_kwargs["sampler"] = train_sampler
+        # Delete the shuffle flag, since you cannot specify both a sampler and
+        # shuffling:
+        del loader_kwargs["shuffle"]
+    # Possibly make a DistributedSampler or a wrapper for some other sampler
+    if distributed_launch and not isinstance(dataset, IterableDataset):
+        drop_last = loader_kwargs.get("drop_last", False)
+        # num_replicas arg is equal to world_size
+        # and retrieved automatically within
+        # DistributedSampler obj.
+        if sampler is not None:
+            train_sampler = DistributedSamplerWrapper(
+                sampler,
+                rank=rank,
+                drop_last=drop_last,
+                shuffle=shuffle,
+            )
+            # with DistributedSamplerWrapper, one must disable shuffling for dataloader
+            loader_kwargs["shuffle"] = False
+            loader_kwargs["sampler"] = train_sampler
+        elif loader_kwargs.get("batch_sampler") is None:
+            # no sampler and batch-sampler
+            train_sampler = DistributedSampler(
+                dataset, rank=rank, shuffle=False, drop_last=drop_last
+            )
+            # with DistributedSamplerWrapper, one must disable shuffling for dataloader
+            loader_kwargs["shuffle"] = False
+            loader_kwargs["sampler"] = train_sampler
+        else:  # batch_sampler was specified
+            train_sampler = DistributedSamplerWrapper(
+                loader_kwargs.get("batch_sampler", None),
+                rank=rank,
+                shuffle=False,
+            )
+            loader_kwargs["batch_sampler"] = train_sampler
+    elif distributed_launch and isinstance(dataset, IterableDataset):
+        logger.warning(
+            "Cannot automatically solve distributed sampling "
+            "for IterableDataset."
+        )
+    return loader_kwargs
 
-
-def __new_init(self, loader, *args, **kwargs):
-    self.__old_init__(loader, *args, **kwargs)
-    if (
-        hasattr(loader, "_speechbrain_recovery_skip_to")
-        and loader._speechbrain_recovery_skip_to is not None
-    ):
-        # Fast forward the sampler iterator since we have recovered:
-        for i in range(loader._speechbrain_recovery_skip_to):
-            try:
-                next(self._sampler_iter)
-            except StopIteration:
-                MSG = "Tried to fast-forward Sampler after checkpoint "
-                f"recovery by {loader._speechbrain_recovery_skip_to} "
-                "indices, but now Sampler raised StopIteration after "
-                f"{i} indices. Ignoring this mismatch."
-                warnings.warn(MSG)
-                break
-            self._num_yielded = i + 1
-        # Mark recovery as done:
-        loader._speechbrain_recovery_skip_to = None
-
-
-def __new_reset(self, loader, first_iter=False, *args, **kwargs):
-    # On the first iteration, these have already normally been set by the init anyway.
-    # And we don't want to overwrite them if we've recovered
-    if not first_iter:
-        self._sampler_iter = iter(self._index_sampler)
-        self._num_yielded = 0
-        self._IterableDataset_len_called = loader._IterableDataset_len_called
-
-
-# functools.update_wrapper is meant for decorators, but it should basically
-# preserve what we want:
-functools.update_wrapper(__new_init, _BaseDataLoaderIter.__init__)
-_BaseDataLoaderIter.__old_init__ = _BaseDataLoaderIter.__init__
-_BaseDataLoaderIter.__init__ = __new_init
-if hasattr(_BaseDataLoaderIter, "_reset"):
-    _BaseDataLoaderIter._reset = __new_reset
-
-
-@register_checkpoint_hooks
 class SaveableDataLoader(DataLoader):
     """A saveable version of the PyTorch DataLoader.
 

@@ -42,6 +42,8 @@ from pathlib import Path
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
 from speechbrain.utils.distributed import run_on_main
+import speechbrain.utils.launcher as dist
+# from data.dataloader import make_dataloader
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +72,7 @@ class ASR(sb.core.Brain):
         if stage == sb.Stage.TRAIN:
             if hasattr(self.hparams, "augmentation"):
                 feats = self.hparams.augmentation(feats)
-        print(f"feat size: {feats.size()}")
+        # print(f"feat size: {feats.size()}")
         # forward modules
         src = self.modules.CNN(feats)
 
@@ -279,26 +281,7 @@ def dataio_prepare(hparams):
         csv_path=hparams["train_csv"], replacements={"data_root": data_folder},
     )
 
-    if hparams["sorting"] == "ascending":
-        # we sort training data to speed up training and get better results.
-        train_data = train_data.filtered_sorted(sort_key="duration")
-        # when sorting do not shuffle in dataloader ! otherwise is pointless
-        hparams["train_dataloader_opts"]["shuffle"] = False
-
-    elif hparams["sorting"] == "descending":
-        train_data = train_data.filtered_sorted(
-            sort_key="duration", reverse=True
-        )
-        # when sorting do not shuffle in dataloader ! otherwise is pointless
-        hparams["train_dataloader_opts"]["shuffle"] = False
-
-    elif hparams["sorting"] == "random":
-        pass
-
-    else:
-        raise NotImplementedError(
-            "sorting must be random, ascending or descending"
-        )
+#############################remove train dataset sorting
     valid_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
         csv_path=hparams["valid_csv"], replacements={"data_root": data_folder},
     )
@@ -373,40 +356,12 @@ def dataio_prepare(hparams):
         datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"],
     )
 
-    # 5. If Dynamic Batching is used, we instantiate the needed samplers.
-    train_batch_sampler = None
-    valid_batch_sampler = None
-    if hparams["dynamic_batching"]:
-        from speechbrain.dataio.sampler import DynamicBatchSampler  # noqa
-
-        dynamic_hparams = hparams["dynamic_batch_sampler"]
-        num_buckets = dynamic_hparams["num_buckets"]
-
-        train_batch_sampler = DynamicBatchSampler(
-            train_data,
-            dynamic_hparams["max_batch_len"],
-            num_buckets=num_buckets,
-            length_func=lambda x: x["duration"],
-            shuffle=dynamic_hparams["shuffle_ex"],
-            batch_ordering=dynamic_hparams["batch_ordering"],
-        )
-
-        valid_batch_sampler = DynamicBatchSampler(
-            valid_data,
-            dynamic_hparams["max_batch_len"],
-            num_buckets=num_buckets,
-            length_func=lambda x: x["duration"],
-            shuffle=dynamic_hparams["shuffle_ex"],
-            batch_ordering=dynamic_hparams["batch_ordering"],
-        )
-
+    ########################remove batch sampler
     return (
         train_data,
         valid_data,
         test_datasets,
         tokenizer,
-        train_batch_sampler,
-        valid_batch_sampler,
     )
 
 
@@ -418,7 +373,11 @@ if __name__ == "__main__":
 
     # If distributed_launch=True then
     # create ddp_group with the right communication protocol
-    sb.utils.distributed.ddp_init_group(run_opts)
+    if run_opts["distributed_launch"]:
+        dist.init_distributed(backend="gloo")
+        world_size = dist.my_size
+    else:
+        world_size = 1
 
     # 1.  # Dataset prep (parsing Librispeech)
     from librispeech_prepare import prepare_librispeech  # noqa
@@ -450,9 +409,7 @@ if __name__ == "__main__":
         train_data,
         valid_data,
         test_datasets,
-        tokenizer,
-        train_bsampler,
-        valid_bsampler,
+        tokenizer
     ) = dataio_prepare(hparams)
 
     # We download the pretrained LM from HuggingFace (or elsewhere depending on
@@ -473,14 +430,8 @@ if __name__ == "__main__":
     asr_brain.tokenizer = hparams["tokenizer"]
     train_dataloader_opts = hparams["train_dataloader_opts"]
     valid_dataloader_opts = hparams["valid_dataloader_opts"]
-
-    if train_bsampler is not None:
-        train_dataloader_opts = {
-            "batch_sampler": train_bsampler,
-            "num_workers": hparams["num_workers"],
-        }
-    if valid_bsampler is not None:
-        valid_dataloader_opts = {"batch_sampler": valid_bsampler}
+    # train_dataloader = make_dataloader(train_data, 'train', world_size>1, **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
+    # valid_dataloader = make_dataloader(valid_data, 'valid', world_size>1, **hparams["valid_dataloader_opts"])
 
     # Training
     asr_brain.fit(
