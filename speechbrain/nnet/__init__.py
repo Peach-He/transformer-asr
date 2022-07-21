@@ -9,4 +9,3 @@ for filename in os.listdir(os.path.dirname(__file__)):
         __all__.append(filename[:-3])
 
 from . import *  # noqa
-from .loss import stoi_loss  # noqa
