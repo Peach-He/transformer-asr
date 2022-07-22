@@ -961,17 +961,21 @@ class Brain:
 
         # Time since last intra-epoch checkpoint
         last_ckpt_time = time.time()
+        total_step = len(train_set)
+        epoch_start_time = time.time()
 
         for batch in train_set:
             if self._optimizer_step_limit_exceeded:
                 logger.info("Train iteration limit exceeded")
                 break
             self.step += 1
+            step_start_time = time.time()
             loss = self.fit_batch(batch)
             self.avg_train_loss = self.update_average(
                 loss, self.avg_train_loss
             )
-            print(f"step: {self.step}, loss: {loss}, avg_loss: {self.avg_train_loss}, lr: {self.hparams.noam_annealing.current_lr}")
+            logger.info(f"epoch: {epoch}, step: {self.step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, \
+                loss: {loss:.4f}, avg_loss: {self.avg_train_loss:.4f}, lr: {self.hparams.noam_annealing.current_lr}")
             # Profile only if desired (steps allow the profiler to know when all is warmed up)
             if self.profiler is not None:
                 if self.profiler.record_steps:
@@ -994,7 +998,7 @@ class Brain:
                 if sb.utils.distributed.if_main_process():
                     self._save_intra_epoch_ckpt()
                 last_ckpt_time = time.time()
-
+        logger.info(f"epoch: {epoch}, time: {(time.time()-epoch_start_time):.2f}s, avg_loss: {self.avg_train_loss:.4f}")
         # Run train "on_stage_end" on all processes
         self.on_stage_end(Stage.TRAIN, self.avg_train_loss, epoch)
         self.avg_train_loss = 0.0
@@ -1006,9 +1010,12 @@ class Brain:
             self.on_stage_start(Stage.VALID, epoch)
             self.modules.eval()
             avg_valid_loss = 0.0
+            eval_start_time = time.time()
+            total_step = len(valid_set)
             with torch.no_grad():
                 for batch in valid_set:
                     self.step += 1
+                    step_start_time = time.time()
                     loss = self.evaluate_batch(batch, stage=Stage.VALID)
                     avg_valid_loss = self.update_average(loss, avg_valid_loss)
 
@@ -1020,6 +1027,8 @@ class Brain:
                     # Debug mode only runs a few batches
                     if self.debug and self.step == self.debug_batches:
                         break
+                    # logger.info(f"epoch: {epoch}, step: {self.step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, \
+                    #     loss: {loss:.4f}, avg_loss: {avg_valid_loss:.4f}")
 
                 # Only run validation "on_stage_end" on main process
                 self.step = 0
@@ -1027,6 +1036,7 @@ class Brain:
                     self.on_stage_end,
                     args=[Stage.VALID, avg_valid_loss, epoch],
                 )
+            logger.info(f"epoch: {epoch}, time: {time.time()-eval_start_time}, avg_loss: {avg_valid_loss}")
 
     def fit(
         self,
@@ -1078,22 +1088,7 @@ class Brain:
             Whether to display the progress of each epoch in a progressbar.
         """
 
-        if not (
-            isinstance(train_set, DataLoader)
-        ):
-            train_set = self.make_dataloader(
-                train_set, stage=sb.Stage.TRAIN, **train_loader_kwargs
-            )
-        if valid_set is not None and not (
-            isinstance(valid_set, DataLoader)
-        ):
-            valid_set = self.make_dataloader(
-                valid_set,
-                stage=sb.Stage.VALID,
-                ckpt_prefix=None,
-                **valid_loader_kwargs,
-            )
-
+        self.train_sampler = train_set.sampler
         self.on_fit_start()
 
         if progressbar is None:
@@ -1155,7 +1150,6 @@ class Brain:
                     module = SyncBatchNorm.convert_sync_batchnorm(module)
                     module = DDP(
                         module,
-                        device_ids=[self.device],
                         find_unused_parameters=self.find_unused_parameters,
                     )
                     self.modules[name] = module

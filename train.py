@@ -43,7 +43,7 @@ import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
 from speechbrain.utils.distributed import run_on_main
 import speechbrain.utils.launcher as dist
-# from data.dataloader import make_dataloader
+from data.dataloader import make_dataloader
 
 logger = logging.getLogger(__name__)
 
@@ -373,35 +373,18 @@ if __name__ == "__main__":
 
     # If distributed_launch=True then
     # create ddp_group with the right communication protocol
-    if run_opts["distributed_launch"]:
-        dist.init_distributed(backend="gloo")
-        world_size = dist.my_size
-    else:
-        world_size = 1
-
-    # 1.  # Dataset prep (parsing Librispeech)
-    from librispeech_prepare import prepare_librispeech  # noqa
+    # if run_opts["distributed_launch"]:
+    #     dist.init_distributed(backend="ccl")
+    #     world_size = dist.my_size
+    # else:
+    #     world_size = 1
+    sb.utils.distributed.ddp_init_group(run_opts)
 
     # Create experiment directory
     sb.create_experiment_directory(
         experiment_directory=hparams["output_folder"],
         hyperparams_to_save=hparams_file,
         overrides=overrides,
-    )
-
-    # multi-gpu (ddp) save data preparation
-    run_on_main(
-        prepare_librispeech,
-        kwargs={
-            "data_folder": hparams["data_folder"],
-            "tr_splits": hparams["train_splits"],
-            "dev_splits": hparams["dev_splits"],
-            "te_splits": hparams["test_splits"],
-            "save_folder": hparams["data_folder"],
-            "merge_lst": hparams["train_splits"],
-            "merge_name": hparams["train_csv"],
-            "skip_prep": hparams["skip_prep"],
-        },
     )
 
     # here we create the datasets objects as well as tokenization and encoding
@@ -430,14 +413,14 @@ if __name__ == "__main__":
     asr_brain.tokenizer = hparams["tokenizer"]
     train_dataloader_opts = hparams["train_dataloader_opts"]
     valid_dataloader_opts = hparams["valid_dataloader_opts"]
-    # train_dataloader = make_dataloader(train_data, 'train', world_size>1, **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
-    # valid_dataloader = make_dataloader(valid_data, 'valid', world_size>1, **hparams["valid_dataloader_opts"])
+    train_dataloader = make_dataloader(train_data, 'train', run_opts["distributed_launch"], **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
+    valid_dataloader = make_dataloader(valid_data, 'valid', run_opts["distributed_launch"], **hparams["valid_dataloader_opts"])
 
     # Training
     asr_brain.fit(
         asr_brain.hparams.epoch_counter,
-        train_data,
-        valid_data,
+        train_dataloader,
+        valid_dataloader,
         train_loader_kwargs=train_dataloader_opts,
         valid_loader_kwargs=valid_dataloader_opts,
     )
