@@ -9,18 +9,13 @@ from hyperpyyaml import resolve_references
 from datetime import date
 import argparse
 
-from utils.logger import setup_logging
-
 
 logger = logging.getLogger(__name__)
-DEFAULT_LOG_CONFIG = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_LOG_CONFIG = os.path.join(DEFAULT_LOG_CONFIG, "log-config.yaml")
 
 def create_experiment_directory(
     experiment_directory,
     hyperparams_to_save=None,
-    overrides={},
-    log_config=DEFAULT_LOG_CONFIG
+    overrides={}
 ):
     try:
         # all writing command must be done with the main_process
@@ -47,14 +42,6 @@ def create_experiment_directory(
                 callingfile = os.path.realpath(module.__file__)
                 shutil.copy(callingfile, experiment_directory)
 
-            # Log exceptions to output automatically
-            log_file = os.path.join(experiment_directory, "log.txt")
-            logger_overrides = {
-                "handlers": {"file_handler": {"filename": log_file}}
-            }
-            setup_logging(log_config, logger_overrides)
-            sys.excepthook = _logging_excepthook
-
             # Log beginning of experiment!
             logger.info("Beginning experiment!")
             logger.info(f"Experiment folder: {experiment_directory}")
@@ -63,9 +50,14 @@ def create_experiment_directory(
         # wait for main_process if ddp is used
         ddp_barrier()
 
-def _logging_excepthook(exc_type, exc_value, exc_traceback):
-    """Interrupt exception raising to log the error."""
-    logger.error("Exception:", exc_info=(exc_type, exc_value, exc_traceback))
+def init_log(distributed_launch):
+    if distributed_launch:
+        if dist.get_rank() == 0:
+            logging.basicConfig(level=logging.INFO)
+        else:
+            logging.basicConfig(level=logging.ERROR)
+    else:
+        logging.basicConfig(level=logging.INFO)
 
 def run_on_main(
     func,

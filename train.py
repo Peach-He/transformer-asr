@@ -5,17 +5,13 @@ import time
 from hyperpyyaml import load_hyperpyyaml
 
 from utils.distributed import run_on_main, ddp_init_group
-import utils.launcher as dist
 from data.dataio.dataloader import make_dataloader
 from data.dataio.dataset import dataio_prepare
-from utils.utils import check_gradients, update_average, create_experiment_directory, parse_arguments
-
-
-logger = logging.getLogger(__name__)
+from utils.utils import check_gradients, update_average, create_experiment_directory, parse_arguments, init_log
 
 
 def train_epoch(model, optimizer, train_set, epoch, hparams):
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("train")
     if train_set.sampler is not None and hasattr(train_set.sampler, "set_epoch"):
         train_set.sampler.set_epoch(epoch)
     model.train()
@@ -68,7 +64,7 @@ def train_epoch(model, optimizer, train_set, epoch, hparams):
 
 
 def evaluate(model, valid_set, epoch, hparams, tokenizer):
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("evaluate")
     acc_metric = hparams["acc_computer"]()
     wer_metric = hparams["error_rate_computer"]()
     model.eval()
@@ -141,6 +137,8 @@ if __name__ == "__main__":
     # else:
     #     world_size = 1
     ddp_init_group(run_opts)
+
+    init_log(run_opts["distributed_launch"])
 
     # Create experiment directory
     create_experiment_directory(

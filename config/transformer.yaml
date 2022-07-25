@@ -3,7 +3,6 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 output_folder: !ref results/transformer/<seed>
 wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
-train_log: !ref <output_folder>/train_log.txt
 
 pretrained_lm_tokenizer_path: speechbrain/asr-transformer-transformerlm-librispeech
 
@@ -226,9 +225,6 @@ compute_features: !new:data.features.Fbank
     sample_rate: !ref <sample_rate>
     n_fft: !ref <n_fft>
     n_mels: !ref <n_mels>
-
-train_logger: !new:utils.train_logger.FileTrainLogger
-    save_file: !ref <train_log>
 
 error_rate_computer: !name:utils.metric_stats.ErrorRateStats
 acc_computer: !name:utils.Accuracy.AccuracyStats
