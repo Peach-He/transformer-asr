@@ -1,373 +1,135 @@
-#!/usr/bin/env python3
-"""Recipe for training a Transformer ASR system with librispeech.
-The system employs an encoder, a decoder, and an attention mechanism
-between them. Decoding is performed with (CTC/Att joint) beamsearch coupled with a neural
-language model.
-
-To run this recipe, do the following:
-> python train.py hparams/transformer.yaml
-> python train.py hparams/conformer.yaml
-
-With the default hyperparameters, the system employs a convolutional frontend and a transformer.
-The decoder is based on a Transformer decoder. Beamsearch coupled with a Transformer
-language model is used  on the top of decoder probabilities.
-
-The neural network is trained on both CTC and negative-log likelihood
-targets and sub-word units estimated with Byte Pairwise Encoding (BPE)
-are used as basic recognition tokens. Training is performed on the full
-LibriSpeech dataset (960 h).
-
-The best model is the average of the checkpoints from last 5 epochs.
-
-The experiment file is flexible enough to support a large variety of
-different systems. By properly changing the parameter files, you can try
-different encoders, decoders, tokens (e.g, characters instead of BPE),
-training split (e.g, train-clean 100 rather than the full one), and many
-other possible variations.
-
-
-Authors
- * Jianyuan Zhong 2020
- * Mirco Ravanelli 2020
- * Peter Plantinga 2020
- * Samuele Cornell 2020, 2021, 2022
- * Titouan Parcollet 2021, 2022
-"""
-
-import os
 import sys
 import torch
 import logging
-from pathlib import Path
-import speechbrain as sb
+import time
 from hyperpyyaml import load_hyperpyyaml
-from speechbrain.utils.distributed import run_on_main
-import speechbrain.utils.launcher as dist
-from data.dataloader import make_dataloader
+
+from utils.distributed import run_on_main, ddp_init_group
+import utils.launcher as dist
+from data.dataio.dataloader import make_dataloader
+from data.dataio.dataset import dataio_prepare
+from utils.utils import check_gradients, update_average, create_experiment_directory, parse_arguments
+
 
 logger = logging.getLogger(__name__)
 
 
-# Define training procedure
-class ASR(sb.core.Brain):
-    def compute_forward(self, batch, stage):
-        """Forward computations from the waveform batches to the output probabilities."""
-        batch = batch.to(self.device)
+def train_epoch(model, optimizer, train_set, epoch, hparams):
+    logger = logging.getLogger(__name__)
+    if train_set.sampler is not None and hasattr(train_set.sampler, "set_epoch"):
+        train_set.sampler.set_epoch(epoch)
+    model.train()
+    
+    step = 0
+    nonfinite_count = 0
+    total_step = len(train_set)
+    avg_train_loss = 0.0
+    epoch_start_time = time.time()
+    for batch in train_set:
+        step += 1
+        step_start_time = time.time()
+        should_step = step % hparams["grad_accumulation_factor"] == 0
         wavs, wav_lens = batch.sig
         tokens_bos, _ = batch.tokens_bos
+        feats = hparams["compute_features"](wavs)
+        feats = hparams["modules"]["normalize"](feats, wav_lens, epoch=epoch)
+        feats = hparams["augmentation"](feats)
 
-        # Add augmentation if specified
-        if stage == sb.Stage.TRAIN:
-            if hasattr(self.modules, "env_corrupt"):
-                wavs_noise = self.modules.env_corrupt(wavs, wav_lens)
-                wavs = torch.cat([wavs, wavs_noise], dim=0)
-                wav_lens = torch.cat([wav_lens, wav_lens])
-                tokens_bos = torch.cat([tokens_bos, tokens_bos], dim=0)
+        src = hparams["modules"]["CNN"](feats)
+        enc_out, pred = hparams["modules"]["Transformer"](src, tokens_bos, wav_lens, pad_idx=hparams["pad_index"])
 
-        # compute features
-        feats = self.hparams.compute_features(wavs)
-        current_epoch = self.hparams.epoch_counter.current
-        feats = self.modules.normalize(feats, wav_lens, epoch=current_epoch)
+        logits = hparams["modules"]["ctc_lin"](enc_out)
+        p_ctc = hparams["log_softmax"](logits)
 
-        if stage == sb.Stage.TRAIN:
-            if hasattr(self.hparams, "augmentation"):
-                feats = self.hparams.augmentation(feats)
-        # print(f"feat size: {feats.size()}")
-        # forward modules
-        src = self.modules.CNN(feats)
-
-        enc_out, pred = self.modules.Transformer(
-            src, tokens_bos, wav_lens, pad_idx=self.hparams.pad_index,
-        )
-
-        # output layer for ctc log-probabilities
-        logits = self.modules.ctc_lin(enc_out)
-        p_ctc = self.hparams.log_softmax(logits)
-
-        # output layer for seq2seq log-probabilities
-        pred = self.modules.seq_lin(pred)
-        p_seq = self.hparams.log_softmax(pred)
-
-        # Compute outputs
-        hyps = None
-        if stage == sb.Stage.TRAIN:
-            hyps = None
-        elif stage == sb.Stage.VALID:
-            hyps = None
-            current_epoch = self.hparams.epoch_counter.current
-            if current_epoch % self.hparams.valid_search_interval == 0:
-                # for the sake of efficiency, we only perform beamsearch with limited capacity
-                # and no LM to give user some idea of how the AM is doing
-                hyps, _ = self.hparams.valid_search(enc_out.detach(), wav_lens)
-        elif stage == sb.Stage.TEST:
-            hyps, _ = self.hparams.test_search(enc_out.detach(), wav_lens)
-
-        return p_ctc, p_seq, wav_lens, hyps
-
-    def compute_objectives(self, predictions, batch, stage):
-        """Computes the loss (CTC+NLL) given predictions and targets."""
-
-        (p_ctc, p_seq, wav_lens, hyps,) = predictions
+        pred = hparams["modules"]["seq_lin"](pred)
+        p_seq = hparams["log_softmax"](pred)
 
         ids = batch.id
         tokens_eos, tokens_eos_lens = batch.tokens_eos
         tokens, tokens_lens = batch.tokens
 
-        if hasattr(self.modules, "env_corrupt") and stage == sb.Stage.TRAIN:
-            tokens_eos = torch.cat([tokens_eos, tokens_eos], dim=0)
-            tokens_eos_lens = torch.cat(
-                [tokens_eos_lens, tokens_eos_lens], dim=0
-            )
-            tokens = torch.cat([tokens, tokens], dim=0)
-            tokens_lens = torch.cat([tokens_lens, tokens_lens], dim=0)
+        loss_seq = hparams["seq_cost"](p_seq, tokens_eos, length=tokens_eos_lens).sum()
+        loss_ctc = hparams["ctc_cost"](p_ctc, tokens, wav_lens, tokens_lens).sum()
+        loss = (hparams["ctc_weight"] * loss_ctc + (1 - hparams["ctc_weight"]) * loss_seq)
+        (loss / hparams["grad_accumulation_factor"]).backward()
 
-        loss_seq = self.hparams.seq_cost(
-            p_seq, tokens_eos, length=tokens_eos_lens
-        ).sum()
+        if should_step:
+            is_loss_finite, nonfinite_count = check_gradients(model, loss, hparams["max_grad_norm"], nonfinite_count)
+            if is_loss_finite:
+                optimizer.step()
+            optimizer.zero_grad()
+            hparams["noam_annealing"](optimizer)
 
-        # now as training progresses we use real prediction from the prev step instead of teacher forcing
+        train_loss = loss.detach().cpu()
+        avg_train_loss = update_average(train_loss, avg_train_loss, step)
+        logger.info(f"epoch: {epoch}, step: {step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, loss: {train_loss}, avg_loss: {avg_train_loss:.4f}, lr: {hparams['noam_annealing'].current_lr}")
 
-        loss_ctc = self.hparams.ctc_cost(
-            p_ctc, tokens, wav_lens, tokens_lens
-        ).sum()
+    logger.info(f"epoch: {epoch}, time: {(time.time()-epoch_start_time):.2f}s, avg_loss: {avg_train_loss:.4f}")
 
-        loss = (
-            self.hparams.ctc_weight * loss_ctc
-            + (1 - self.hparams.ctc_weight) * loss_seq
-        )
 
-        if stage != sb.Stage.TRAIN:
-            current_epoch = self.hparams.epoch_counter.current
-            valid_search_interval = self.hparams.valid_search_interval
-            if current_epoch % valid_search_interval == 0 or (
-                stage == sb.Stage.TEST
-            ):
-                # Decode token terms to words
-                predicted_words = [
-                    tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in hyps
-                ]
-                target_words = [wrd.split(" ") for wrd in batch.wrd]
-                self.wer_metric.append(ids, predicted_words, target_words)
+def evaluate(model, valid_set, epoch, hparams, tokenizer):
+    logger = logging.getLogger(__name__)
+    acc_metric = hparams["acc_computer"]()
+    wer_metric = hparams["error_rate_computer"]()
+    model.eval()
+    avg_valid_loss = 0.0
+    total_step = len(valid_set)
+    step = 0
+    eval_start_time = time.time()
+    with torch.no_grad():
+        for batch in valid_set:
+            step += 1
+            step_start_time = time.time()
+            wavs, wav_lens = batch.sig
+            tokens_bos, _ = batch.tokens_bos
+            feats = hparams["compute_features"](wavs)
+            feats = hparams["modules"]["normalize"](feats, wav_lens, epoch=epoch)
 
-            # compute the accuracy of the one-step-forward prediction
-            self.acc_metric.append(p_seq, tokens_eos, tokens_eos_lens)
-        return loss
+            src = hparams["modules"]["CNN"](feats)
+            enc_out, pred = hparams["modules"]["Transformer"](src, tokens_bos, wav_lens, pad_idx=hparams["pad_index"])
 
-    def fit_batch(self, batch):
+            logits = hparams["modules"]["ctc_lin"](enc_out)
+            p_ctc = hparams["log_softmax"](logits)
 
-        should_step = self.step % self.grad_accumulation_factor == 0
-        # Managing automatic mixed precision
-        if self.auto_mix_prec:
-            self.optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
-                outputs = self.compute_forward(batch, sb.Stage.TRAIN)
-                loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
-            self.scaler.scale(loss / self.grad_accumulation_factor).backward()
-            if should_step:
-                self.scaler.unscale_(self.optimizer)
-                if self.check_gradients(loss):
-                    self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer_step += 1
+            pred = hparams["modules"]["seq_lin"](pred)
+            p_seq = hparams["log_softmax"](pred)
 
-                # anneal lr every update
-                self.hparams.noam_annealing(self.optimizer)
-        else:
-            outputs = self.compute_forward(batch, sb.Stage.TRAIN)
-            loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
-            (loss / self.grad_accumulation_factor).backward()
-            if should_step:
-                if self.check_gradients(loss):
-                    self.optimizer.step()
-                self.optimizer.zero_grad()
-                self.optimizer_step += 1
+            hyps, _ = hparams["valid_search"](enc_out.detach(), wav_lens)
 
-                # anneal lr every update
-                self.hparams.noam_annealing(self.optimizer)
+            ids = batch.id
+            tokens_eos, tokens_eos_lens = batch.tokens_eos
+            tokens, tokens_lens = batch.tokens
 
-        return loss.detach().cpu()
+            loss_seq = hparams["seq_cost"](p_seq, tokens_eos, length=tokens_eos_lens).sum()
+            loss_ctc = hparams["ctc_cost"](p_ctc, tokens, wav_lens, tokens_lens).sum()
 
-    def evaluate_batch(self, batch, stage):
-        """Computations needed for validation/test batches"""
-        with torch.no_grad():
-            predictions = self.compute_forward(batch, stage=stage)
-            loss = self.compute_objectives(predictions, batch, stage=stage)
-        return loss.detach()
+            loss = (hparams["ctc_weight"] * loss_ctc + (1 - hparams["ctc_weight"]) * loss_seq)
+            predicted_words = [tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in hyps]
+            target_words = [wrd.split(" ") for wrd in batch.wrd]
+            wer_metric.append(ids, predicted_words, target_words)
+            acc_metric.append(p_seq, tokens_eos, tokens_eos_lens)
 
-    def on_stage_start(self, stage, epoch):
-        """Gets called at the beginning of each epoch"""
-        if stage != sb.Stage.TRAIN:
-            self.acc_metric = self.hparams.acc_computer()
-            self.wer_metric = self.hparams.error_rate_computer()
+            eval_loss = loss.detach().cpu()
+            avg_valid_loss = update_average(eval_loss, avg_valid_loss, step)
+            logger.info(f"epoch: {epoch}, step: {step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, loss: {eval_loss}, avg_loss: {avg_valid_loss:.4f}")
 
-    def on_stage_end(self, stage, stage_loss, epoch):
-        """Gets called at the end of a epoch."""
-        # Compute/store important stats
-        stage_stats = {"loss": stage_loss}
-        if stage == sb.Stage.TRAIN:
-            self.train_stats = stage_stats
-        else:
-            stage_stats["ACC"] = self.acc_metric.summarize()
-            current_epoch = self.hparams.epoch_counter.current
-            valid_search_interval = self.hparams.valid_search_interval
-            if (
-                current_epoch % valid_search_interval == 0
-                or stage == sb.Stage.TEST
-            ):
-                stage_stats["WER"] = self.wer_metric.summarize("error_rate")
+        acc = acc_metric.summarize()
+        wer = wer_metric.summarize("error_rate")
+        logger.info(f"epoch: {epoch}, time: {time.time()-eval_start_time}, wer: {wer}, acc: {acc}, avg_loss: {avg_valid_loss}")
 
-        # log stats and save checkpoint at end-of-epoch
-        if stage == sb.Stage.VALID and sb.utils.distributed.if_main_process():
-
-            lr = self.hparams.noam_annealing.current_lr
-            steps = self.optimizer_step
-            optimizer = self.optimizer.__class__.__name__
-
-            epoch_stats = {
-                "epoch": epoch,
-                "lr": lr,
-                "steps": steps,
-                "optimizer": optimizer,
-            }
-            self.hparams.train_logger.log_stats(
-                stats_meta=epoch_stats,
-                train_stats=self.train_stats,
-                valid_stats=stage_stats,
-            )
-            self.checkpointer.save_and_keep_only(
-                meta={"ACC": stage_stats["ACC"], "epoch": epoch},
-                max_keys=["ACC"],
-                num_to_keep=5,
-            )
-
-        elif stage == sb.Stage.TEST:
-            self.hparams.train_logger.log_stats(
-                stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
-                test_stats=stage_stats,
-            )
-            with open(self.hparams.wer_file, "w") as w:
-                self.wer_metric.write_stats(w)
-
-            # save the averaged checkpoint at the end of the evaluation stage
-            # delete the rest of the intermediate checkpoints
-            # ACC is set to 1.1 so checkpointer only keeps the averaged checkpoint
-            self.checkpointer.save_and_keep_only(
+def train(model, optimizer, train_set, valid_set, tokenizer, checkpointer, hparams):
+    for epoch in hparams["epoch_counter"]:
+        train_epoch(model, optimizer, train_set, epoch, hparams)
+        evaluate(model, valid_set, epoch, hparams, tokenizer)
+        checkpointer.save_and_keep_only(
                 meta={"ACC": 1.1, "epoch": epoch},
                 max_keys=["ACC"],
                 num_to_keep=1,
             )
 
-    def on_evaluate_start(self, max_key=None, min_key=None):
-        """perform checkpoint averge if needed"""
-        super().on_evaluate_start()
-
-        ckpts = self.checkpointer.find_checkpoints(
-            max_key=max_key, min_key=min_key
-        )
-        ckpt = sb.utils.checkpoints.average_checkpoints(
-            ckpts, recoverable_name="model", device=self.device
-        )
-
-        self.hparams.model.load_state_dict(ckpt, strict=True)
-        self.hparams.model.eval()
-
-
-def dataio_prepare(hparams):
-    """This function prepares the datasets to be used in the brain class.
-    It also defines the data processing pipeline through user-defined functions."""
-    data_folder = hparams["data_folder"]
-
-    train_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
-        csv_path=hparams["train_csv"], replacements={"data_root": data_folder},
-    )
-
-#############################remove train dataset sorting
-    valid_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
-        csv_path=hparams["valid_csv"], replacements={"data_root": data_folder},
-    )
-    valid_data = valid_data.filtered_sorted(sort_key="duration")
-
-    # test is separate
-    test_datasets = {}
-    for csv_file in hparams["test_csv"]:
-        name = Path(csv_file).stem
-        test_datasets[name] = sb.dataio.dataset.DynamicItemDataset.from_csv(
-            csv_path=csv_file, replacements={"data_root": data_folder}
-        )
-        test_datasets[name] = test_datasets[name].filtered_sorted(
-            sort_key="duration"
-        )
-
-    datasets = [train_data, valid_data] + [i for k, i in test_datasets.items()]
-    valtest_datasets = [valid_data] + [i for k, i in test_datasets.items()]
-
-    # We get the tokenizer as we need it to encode the labels when creating
-    # mini-batches.
-    tokenizer = hparams["tokenizer"]
-
-    # 2. Define audio pipeline:
-    @sb.utils.data_pipeline.takes("wav")
-    @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav):
-        sig = sb.dataio.dataio.read_audio(wav)
-        return sig
-
-    sb.dataio.dataset.add_dynamic_item(valtest_datasets, audio_pipeline)
-
-    @sb.utils.data_pipeline.takes("wav")
-    @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline_train(wav):
-        # Speed Perturb is done here so it is multi-threaded with the
-        # workers of the dataloader (faster).
-        if hparams["speed_perturb"]:
-            sig = sb.dataio.dataio.read_audio(wav)
-            # factor = np.random.uniform(0.95, 1.05)
-            # sig = resample(sig.numpy(), 16000, int(16000*factor))
-            speed = sb.processing.speech_augmentation.SpeedPerturb(
-                16000, [x for x in range(95, 105)]
-            )
-            sig = speed(sig.unsqueeze(0)).squeeze(0)  # torch.from_numpy(sig)
-        else:
-            sig = sb.dataio.dataio.read_audio(wav)
-        return sig
-
-    sb.dataio.dataset.add_dynamic_item([train_data], audio_pipeline_train)
-
-    # 3. Define text pipeline:
-    @sb.utils.data_pipeline.takes("wrd")
-    @sb.utils.data_pipeline.provides(
-        "wrd", "tokens_list", "tokens_bos", "tokens_eos", "tokens"
-    )
-    def text_pipeline(wrd):
-        yield wrd
-        tokens_list = tokenizer.encode_as_ids(wrd)
-        yield tokens_list
-        tokens_bos = torch.LongTensor([hparams["bos_index"]] + (tokens_list))
-        yield tokens_bos
-        tokens_eos = torch.LongTensor(tokens_list + [hparams["eos_index"]])
-        yield tokens_eos
-        tokens = torch.LongTensor(tokens_list)
-        yield tokens
-
-    sb.dataio.dataset.add_dynamic_item(datasets, text_pipeline)
-
-    # 4. Set output:
-    sb.dataio.dataset.set_output_keys(
-        datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"],
-    )
-
-    ########################remove batch sampler
-    return (
-        train_data,
-        valid_data,
-        test_datasets,
-        tokenizer,
-    )
-
 
 if __name__ == "__main__":
-    # CLI:
-    hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
+    hparams_file, run_opts, overrides = parse_arguments(sys.argv[1:])
     with open(hparams_file) as fin:
         hparams = load_hyperpyyaml(fin, overrides)
 
@@ -378,21 +140,19 @@ if __name__ == "__main__":
     #     world_size = dist.my_size
     # else:
     #     world_size = 1
-    sb.utils.distributed.ddp_init_group(run_opts)
+    ddp_init_group(run_opts)
 
     # Create experiment directory
-    sb.create_experiment_directory(
+    create_experiment_directory(
         experiment_directory=hparams["output_folder"],
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
 
-    # here we create the datasets objects as well as tokenization and encoding
     (
         train_data,
         valid_data,
-        test_datasets,
-        tokenizer
+        test_datasets
     ) = dataio_prepare(hparams)
 
     # We download the pretrained LM from HuggingFace (or elsewhere depending on
@@ -400,38 +160,15 @@ if __name__ == "__main__":
     run_on_main(hparams["pretrainer"].collect_files)
     hparams["pretrainer"].load_collected(device=run_opts["device"])
 
-    # Trainer initialization
-    asr_brain = ASR(
-        modules=hparams["modules"],
-        opt_class=hparams["Adam"],
-        hparams=hparams,
-        run_opts=run_opts,
-        checkpointer=hparams["checkpointer"],
-    )
+    modules = torch.nn.ModuleDict(hparams["modules"])
+    tokenizer = hparams["tokenizer"]
+    checkpointer = hparams["checkpointer"]
 
-    # adding objects to trainer:
-    asr_brain.tokenizer = hparams["tokenizer"]
     train_dataloader_opts = hparams["train_dataloader_opts"]
     valid_dataloader_opts = hparams["valid_dataloader_opts"]
     train_dataloader = make_dataloader(train_data, 'train', run_opts["distributed_launch"], **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
     valid_dataloader = make_dataloader(valid_data, 'valid', run_opts["distributed_launch"], **hparams["valid_dataloader_opts"])
 
-    # Training
-    asr_brain.fit(
-        asr_brain.hparams.epoch_counter,
-        train_dataloader,
-        valid_dataloader,
-        train_loader_kwargs=train_dataloader_opts,
-        valid_loader_kwargs=valid_dataloader_opts,
-    )
+    optimizer = hparams["Adam"](modules.parameters())
 
-    # Testing
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        asr_brain.hparams.wer_file = os.path.join(
-            hparams["output_folder"], "wer_{}.txt".format(k)
-        )
-        asr_brain.evaluate(
-            test_datasets[k],
-            max_key="ACC",
-            test_loader_kwargs=hparams["test_dataloader_opts"],
-        )
+    train(modules, optimizer, train_dataloader, valid_dataloader, tokenizer, checkpointer, hparams)

@@ -4,8 +4,8 @@ import random
 from collections import Counter
 import logging
 import torchaudio
-from speechbrain.utils.data_utils import download_file, get_all_files
-from speechbrain.dataio.dataio import (
+from utils.data_utils import download_file, get_all_files
+from dataio.dataio import (
     load_pkl,
     save_pkl,
     merge_csvs,
@@ -30,7 +30,6 @@ def prepare_librispeech(
 ):
     """
     This class prepares the csv files for the LibriSpeech dataset.
-    Download link: http://www.openslr.org/12
 
     Arguments
     ---------
@@ -58,16 +57,6 @@ def prepare_librispeech(
         to phonemes. Use it for training a G2P system.
     skip_prep: bool
         If True, data preparation is skipped.
-
-
-    Example
-    -------
-    >>> data_folder = 'datasets/LibriSpeech'
-    >>> tr_splits = ['train-clean-100']
-    >>> dev_splits = ['dev-clean']
-    >>> te_splits = ['test-clean']
-    >>> save_folder = 'librispeech_prepared'
-    >>> prepare_librispeech(data_folder, save_folder, tr_splits, dev_splits, te_splits)
     """
 
     if skip_prep:
