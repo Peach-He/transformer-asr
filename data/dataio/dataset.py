@@ -332,7 +332,7 @@ def set_output_keys(datasets, output_keys):
         dataset.set_output_keys(output_keys)
 
 
-def dataio_prepare(hparams):
+def dataio_prepare(hparams, tokenizer):
     """This function prepares the datasets.
     It also defines the data processing pipeline through user-defined functions."""
     data_folder = hparams["data_folder"]
@@ -359,8 +359,6 @@ def dataio_prepare(hparams):
 
     datasets = [train_data, valid_data] + [i for k, i in test_datasets.items()]
     valtest_datasets = [valid_data] + [i for k, i in test_datasets.items()]
-
-    tokenizer = hparams["tokenizer"]
 
     # Define audio pipeline:
     @utils.data_pipeline.takes("wav")
