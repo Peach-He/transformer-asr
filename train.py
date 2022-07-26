@@ -78,7 +78,7 @@ def train_epoch(model, optimizer, train_set, epoch, hparams):
     logger.info(f"epoch: {epoch}, time: {(time.time()-epoch_start_time):.2f}s, avg_loss: {avg_train_loss:.4f}")
 
 
-def evaluate(model, valid_set, epoch, hparams, tokenizer):
+def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher):
     logger = logging.getLogger("evaluate")
     acc_metric = hparams["acc_computer"]()
     wer_metric = hparams["error_rate_computer"]()
@@ -105,7 +105,7 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer):
             pred = model["seq_lin"](pred)
             p_seq = hparams["log_softmax"](pred)
 
-            hyps, _ = hparams["valid_search"](enc_out.detach(), wav_lens)
+            hyps, _ = searcher(enc_out.detach(), wav_lens)
 
             ids = batch.id
             tokens_eos, tokens_eos_lens = batch.tokens_eos
@@ -130,10 +130,10 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer):
         wer = wer_metric.summarize("error_rate")
         logger.info(f"epoch: {epoch}, time: {time.time()-eval_start_time}, wer: {wer}, acc: {acc}, avg_loss: {avg_valid_loss}")
 
-def train(model, optimizer, train_set, valid_set, tokenizer, hparams):
+def train(model, optimizer, train_set, valid_set, searcher, tokenizer, hparams):
     for epoch in hparams["epoch_counter"]:
         train_epoch(model, optimizer, train_set, epoch, hparams)
-        evaluate(model, valid_set, epoch, hparams, tokenizer)
+        evaluate(model, valid_set, epoch, hparams, tokenizer, searcher)
         # checkpointer.save_and_keep_only(
         #         meta={"ACC": 1.1, "epoch": epoch},
         #         max_keys=["ACC"],
@@ -159,8 +159,7 @@ if __name__ == "__main__":
     tokenizer = sp.SentencePieceProcessor()
     train_data, valid_data, test_datasets = dataio_prepare(hparams, tokenizer)
 
-    # load LM and tokenizer
-    # load_torch_model(hparams["lm_model"], hparams["lm_model_path"], run_opts["device"])
+    # load tokenizer
     load_spm(tokenizer, hparams["tokenizer_path"])
 
     modules = {}
@@ -207,8 +206,6 @@ if __name__ == "__main__":
     modules["ctc_lin"] = ctc_lin
     modules["normalize"] = normalize
 
-    # modules = torch.nn.ModuleDict(hparams["modules"])
-    # tokenizer = hparams["tokenizer"]
     # checkpointer = hparams["checkpointer"]
     model = torch.nn.ModuleDict(modules)
     mm = torch.nn.ModuleList([cnn, transformer, seq_lin, ctc_lin])
@@ -218,7 +215,19 @@ if __name__ == "__main__":
     train_dataloader = make_dataloader(train_data, 'train', run_opts["distributed_launch"], **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
     valid_dataloader = make_dataloader(valid_data, 'valid', run_opts["distributed_launch"], **hparams["valid_dataloader_opts"])
 
-    # optimizer = hparams["Adam"](modules.parameters())
     optimizer = torch.optim.Adam(model.parameters(), lr=hparams["lr_adam"], betas=(0.9, 0.98), eps=0.000000001)
 
-    train(model, optimizer, train_dataloader, valid_dataloader, tokenizer, hparams)
+    valid_searcher = S2STransformerBeamSearch(
+        modules = [transformer, seq_lin, ctc_lin],
+        bos_index = hparams["bos_index"], 
+        eos_index = hparams["eos_index"], 
+        blank_index = hparams["blank_index"],
+        min_decode_ratio = hparams["min_decode_ratio"],
+        max_decode_ratio = hparams["max_decode_ratio"], 
+        beam_size = hparams["valid_beam_size"], 
+        ctc_weight = hparams["ctc_weight_decode"], 
+        using_eos_threshold = False,
+        length_normalization = False
+    )
+
+    train(model, optimizer, train_dataloader, valid_dataloader, valid_searcher, tokenizer, hparams)
