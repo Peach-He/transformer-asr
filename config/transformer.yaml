@@ -229,11 +229,5 @@ compute_features: !new:data.features.Fbank
 error_rate_computer: !name:utils.metric_stats.ErrorRateStats
 acc_computer: !name:utils.Accuracy.AccuracyStats
 
-pretrainer: !new:utils.parameter_transfer.Pretrainer
-    collect_in: !ref <save_folder>
-    loadables:
-        lm: !ref <lm_model>
-        tokenizer: !ref <tokenizer>
-    paths:
-        lm: !ref <pretrained_lm_tokenizer_path>/lm.ckpt
-        tokenizer: !ref <pretrained_lm_tokenizer_path>/tokenizer.ckpt
+lm_model_path: !ref <save_folder>/lm.ckpt
+tokenizer_path: !ref <save_folder>/tokenizer.ckpt

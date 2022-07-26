@@ -8,6 +8,7 @@ from utils.distributed import run_on_main, ddp_init_group
 from data.dataio.dataloader import make_dataloader
 from data.dataio.dataset import dataio_prepare
 from utils.utils import check_gradients, update_average, create_experiment_directory, parse_arguments, init_log
+from utils.parameter_transfer import load_torch_model, load_spm
 
 
 def train_epoch(model, optimizer, train_set, epoch, hparams):
@@ -153,10 +154,9 @@ if __name__ == "__main__":
         test_datasets
     ) = dataio_prepare(hparams)
 
-    # We download the pretrained LM from HuggingFace (or elsewhere depending on
-    # the path given in the YAML file). The tokenizer is loaded at the same time.
-    run_on_main(hparams["pretrainer"].collect_files)
-    hparams["pretrainer"].load_collected(device=run_opts["device"])
+    # load LM and tokenizer
+    load_torch_model(hparams["lm_model"], hparams["lm_model_path"], run_opts["device"])
+    load_spm(hparams["tokenizer"], hparams["tokenizer_path"])
 
     modules = torch.nn.ModuleDict(hparams["modules"])
     tokenizer = hparams["tokenizer"]
