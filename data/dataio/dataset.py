@@ -332,23 +332,23 @@ def set_output_keys(datasets, output_keys):
         dataset.set_output_keys(output_keys)
 
 
-def dataio_prepare(hparams, tokenizer):
+def dataio_prepare(args, hparams, tokenizer):
     """This function prepares the datasets.
     It also defines the data processing pipeline through user-defined functions."""
-    data_folder = hparams["data_folder"]
+    data_folder = args.data_folder
 
     train_data = DynamicItemDataset.from_csv(
-        csv_path=hparams["train_csv"], replacements={"data_root": data_folder},
+        csv_path=args.train_csv, replacements={"data_root": data_folder},
     )
 
     valid_data = DynamicItemDataset.from_csv(
-        csv_path=hparams["valid_csv"], replacements={"data_root": data_folder},
+        csv_path=args.valid_csv, replacements={"data_root": data_folder},
     )
     valid_data = valid_data.filtered_sorted(sort_key="duration")
 
     # test is separate
     test_datasets = {}
-    for csv_file in hparams["test_csv"]:
+    for csv_file in args.test_csv:
         name = Path(csv_file).stem
         test_datasets[name] = DynamicItemDataset.from_csv(
             csv_path=csv_file, replacements={"data_root": data_folder}

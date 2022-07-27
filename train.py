@@ -2,14 +2,13 @@ import sys
 import torch
 import logging
 import time
-from hyperpyyaml import load_hyperpyyaml
 import yaml
 import sentencepiece as sp
 
 from utils.distributed import run_on_main, ddp_init_group
 from data.dataio.dataloader import make_dataloader
 from data.dataio.dataset import dataio_prepare
-from utils.utils import check_gradients, update_average, create_experiment_directory, parse_arguments, init_log, parse_args
+from utils.utils import check_gradients, update_average, create_experiment_directory, init_log, parse_args
 from utils.parameter_transfer import load_torch_model, load_spm
 from model.module.convolution import ConvolutionFrontEnd
 from model.TransformerASR import TransformerASR
@@ -148,27 +147,23 @@ def train(model, optimizer, train_set, valid_set, searcher, tokenizer, hparams):
 
 
 if __name__ == "__main__":
-    hparams_file, run_opts, overrides = parse_arguments(sys.argv[1:])
-    with open(hparams_file) as fin:
-        hparams = load_hyperpyyaml(fin, overrides)
+    args = parse_args()
+    with open(args.param_file, 'r') as f:
+        hparams = yaml.safe_load(f)
     
-    torch.manual_seed(hparams["seed"])
+    torch.manual_seed(args.seed)
 
-    ddp_init_group(run_opts)
-    init_log(run_opts["distributed_launch"])
+    ddp_init_group(args)
+    init_log(args.distributed_launch)
 
     # Create experiment directory
-    create_experiment_directory(
-        experiment_directory=hparams["output_folder"],
-        hyperparams_to_save=hparams_file,
-        overrides=overrides,
-    )
+    create_experiment_directory(args.output_folder)
 
     tokenizer = sp.SentencePieceProcessor()
-    train_data, valid_data, test_datasets = dataio_prepare(hparams, tokenizer)
+    train_data, valid_data, test_datasets = dataio_prepare(args, hparams, tokenizer)
 
     # load tokenizer
-    load_spm(tokenizer, hparams["tokenizer_path"])
+    load_spm(tokenizer, args.tokenizer_ckpt)
 
     modules = {}
     cnn = ConvolutionFrontEnd(
@@ -220,8 +215,8 @@ if __name__ == "__main__":
 
     train_dataloader_opts = hparams["train_dataloader_opts"]
     valid_dataloader_opts = hparams["valid_dataloader_opts"]
-    train_dataloader = make_dataloader(train_data, 'train', run_opts["distributed_launch"], **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
-    valid_dataloader = make_dataloader(valid_data, 'valid', run_opts["distributed_launch"], **hparams["valid_dataloader_opts"])
+    train_dataloader = make_dataloader(train_data, 'train', args.distributed_launch, **hparams["train_dataloader_opts"])   # remove checkpoint with dataloader
+    valid_dataloader = make_dataloader(valid_data, 'valid', args.distributed_launch, **hparams["valid_dataloader_opts"])
 
     optimizer = torch.optim.Adam(model.parameters(), lr=hparams["lr_adam"], betas=(0.9, 0.98), eps=0.000000001)
 
