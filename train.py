@@ -1,4 +1,3 @@
-from select import select
 import sys
 import torch
 import logging
@@ -6,8 +5,6 @@ import time
 from hyperpyyaml import load_hyperpyyaml
 import yaml
 import sentencepiece as sp
-from model import module
-from model.module import linear
 
 from utils.distributed import run_on_main, ddp_init_group
 from data.dataio.dataloader import make_dataloader
@@ -21,10 +18,18 @@ from data.processing.features import InputNormalization
 from utils.checkpoints import Checkpointer
 from model.TransformerLM import TransformerLM
 from model.decoders.seq2seq import S2STransformerBeamSearch
+from trainer.losses import ctc_loss, kldiv_loss
+from trainer.schedulers import NoamScheduler
+from data.augment import SpecAugment
+from data.features import Fbank
+from utils.Accuracy import AccuracyStats
+from utils.metric_stats import ErrorRateStats
 
 
-def train_epoch(model, optimizer, train_set, epoch, hparams):
+def train_epoch(model, optimizer, train_set, epoch, hparams, scheduler, feat_proc):
     logger = logging.getLogger("train")
+
+    augment = SpecAugment(**hparams["augmentation"])
     if train_set.sampler is not None and hasattr(train_set.sampler, "set_epoch"):
         train_set.sampler.set_epoch(epoch)
     model.train()
@@ -40,25 +45,26 @@ def train_epoch(model, optimizer, train_set, epoch, hparams):
         should_step = step % hparams["grad_accumulation_factor"] == 0
         wavs, wav_lens = batch.sig
         tokens_bos, _ = batch.tokens_bos
-        feats = hparams["compute_features"](wavs)
+        feats = feat_proc(wavs)
         feats = model["normalize"](feats, wav_lens, epoch=epoch)
-        feats = hparams["augmentation"](feats)
+        feats = augment(feats)
 
         src = model["CNN"](feats)
         enc_out, pred = model["Transformer"](src, tokens_bos, wav_lens, pad_idx=hparams["pad_index"])
 
         logits = model["ctc_lin"](enc_out)
-        p_ctc = hparams["log_softmax"](logits)
+        p_ctc = logits.log_softmax(dim=-1)
 
         pred = model["seq_lin"](pred)
-        p_seq = hparams["log_softmax"](pred)
+        p_seq = pred.log_softmax(dim=-1)
 
         ids = batch.id
         tokens_eos, tokens_eos_lens = batch.tokens_eos
         tokens, tokens_lens = batch.tokens
 
-        loss_seq = hparams["seq_cost"](p_seq, tokens_eos, length=tokens_eos_lens).sum()
-        loss_ctc = hparams["ctc_cost"](p_ctc, tokens, wav_lens, tokens_lens).sum()
+        loss_seq = kldiv_loss(p_seq, tokens_eos, length=tokens_eos_lens, label_smoothing=hparams["label_smoothing"], reduction=hparams["loss_reduction"]).sum()
+        loss_ctc = ctc_loss(p_ctc, tokens, wav_lens, tokens_lens, blank_index=hparams["blank_index"], reduction=hparams["loss_reduction"]).sum()
+
         loss = (hparams["ctc_weight"] * loss_ctc + (1 - hparams["ctc_weight"]) * loss_seq)
         (loss / hparams["grad_accumulation_factor"]).backward()
 
@@ -67,21 +73,20 @@ def train_epoch(model, optimizer, train_set, epoch, hparams):
             if is_loss_finite:
                 optimizer.step()
             optimizer.zero_grad()
-            hparams["noam_annealing"](optimizer)
+            scheduler(optimizer)
 
         train_loss = loss.detach().cpu()
         avg_train_loss = update_average(train_loss, avg_train_loss, step)
-        logger.info(f"epoch: {epoch}, step: {step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, loss: {train_loss}, avg_loss: {avg_train_loss:.4f}, lr: {hparams['noam_annealing'].current_lr}")
+        logger.info(f"epoch: {epoch}, step: {step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, loss: {train_loss}, avg_loss: {avg_train_loss:.4f}, lr: {scheduler.current_lr}")
 
-        if step==7:
-            break
     logger.info(f"epoch: {epoch}, time: {(time.time()-epoch_start_time):.2f}s, avg_loss: {avg_train_loss:.4f}")
 
 
-def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher):
+def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher, feat_proc):
     logger = logging.getLogger("evaluate")
-    acc_metric = hparams["acc_computer"]()
-    wer_metric = hparams["error_rate_computer"]()
+
+    acc_metric = AccuracyStats()
+    wer_metric = ErrorRateStats()
     model.eval()
     avg_valid_loss = 0.0
     total_step = len(valid_set)
@@ -93,17 +98,17 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher):
             step_start_time = time.time()
             wavs, wav_lens = batch.sig
             tokens_bos, _ = batch.tokens_bos
-            feats = hparams["compute_features"](wavs)
+            feats = feat_proc(wavs)
             feats = model["normalize"](feats, wav_lens, epoch=epoch)
 
             src = model["CNN"](feats)
             enc_out, pred = model["Transformer"](src, tokens_bos, wav_lens, pad_idx=hparams["pad_index"])
 
             logits = model["ctc_lin"](enc_out)
-            p_ctc = hparams["log_softmax"](logits)
+            p_ctc = logits.log_softmax(dim=-1)
 
             pred = model["seq_lin"](pred)
-            p_seq = hparams["log_softmax"](pred)
+            p_seq = pred.log_softmax(dim=-1)
 
             hyps, _ = searcher(enc_out.detach(), wav_lens)
 
@@ -111,8 +116,8 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher):
             tokens_eos, tokens_eos_lens = batch.tokens_eos
             tokens, tokens_lens = batch.tokens
 
-            loss_seq = hparams["seq_cost"](p_seq, tokens_eos, length=tokens_eos_lens).sum()
-            loss_ctc = hparams["ctc_cost"](p_ctc, tokens, wav_lens, tokens_lens).sum()
+            loss_seq = kldiv_loss(p_seq, tokens_eos, length=tokens_eos_lens, label_smoothing=hparams["label_smoothing"], reduction=hparams["loss_reduction"]).sum()
+            loss_ctc = ctc_loss(p_ctc, tokens, wav_lens, tokens_lens, blank_index=hparams["blank_index"], reduction=hparams["loss_reduction"]).sum()
 
             loss = (hparams["ctc_weight"] * loss_ctc + (1 - hparams["ctc_weight"]) * loss_seq)
             predicted_words = [tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in hyps]
@@ -124,16 +129,17 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher):
             avg_valid_loss = update_average(eval_loss, avg_valid_loss, step)
             logger.info(f"epoch: {epoch}, step: {step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, loss: {eval_loss}, avg_loss: {avg_valid_loss:.4f}")
 
-            if step == 10:
-                break
         acc = acc_metric.summarize()
         wer = wer_metric.summarize("error_rate")
         logger.info(f"epoch: {epoch}, time: {time.time()-eval_start_time}, wer: {wer}, acc: {acc}, avg_loss: {avg_valid_loss}")
 
 def train(model, optimizer, train_set, valid_set, searcher, tokenizer, hparams):
-    for epoch in hparams["epoch_counter"]:
-        train_epoch(model, optimizer, train_set, epoch, hparams)
-        evaluate(model, valid_set, epoch, hparams, tokenizer, searcher)
+    scheduler = NoamScheduler(lr_initial=hparams["lr_adam"], n_warmup_steps=hparams["n_warmup_steps"])
+    feat_proc = Fbank(**hparams["compute_features"])
+
+    for epoch in range(1, hparams["epochs"]+1):
+        train_epoch(model, optimizer, train_set, epoch, hparams, scheduler, feat_proc)
+        evaluate(model, valid_set, epoch, hparams, tokenizer, searcher, feat_proc)
         # checkpointer.save_and_keep_only(
         #         meta={"ACC": 1.1, "epoch": epoch},
         #         max_keys=["ACC"],
@@ -145,6 +151,8 @@ if __name__ == "__main__":
     hparams_file, run_opts, overrides = parse_arguments(sys.argv[1:])
     with open(hparams_file) as fin:
         hparams = load_hyperpyyaml(fin, overrides)
+    
+    torch.manual_seed(hparams["seed"])
 
     ddp_init_group(run_opts)
     init_log(run_opts["distributed_launch"])
@@ -181,7 +189,7 @@ if __name__ == "__main__":
         num_decoder_layers = hparams["num_decoder_layers"],
         d_ffn = hparams["d_ffn"],
         dropout = hparams["transformer_dropout"],
-        activation = hparams["activation"],
+        activation = torch.nn.GELU,
         attention_type = "regularMHA",
         normalize_before = True,
         causal = False

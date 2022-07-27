@@ -1,5 +1,4 @@
 seed: 74443
-__set_seed: !apply:torch.manual_seed [!ref <seed>]
 output_folder: !ref results/transformer/<seed>
 wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
@@ -21,7 +20,7 @@ test_csv:
 ckpt_interval_minutes: 30 # save checkpoint every N min
 
 # Training parameters
-number_of_epochs: 60
+epochs: 60
 batch_size: 32
 ctc_weight: 0.3
 grad_accumulation_factor: 2
@@ -66,7 +65,6 @@ num_encoder_layers: 12
 num_decoder_layers: 6
 d_ffn: 2048
 transformer_dropout: 0.1
-activation: !name:torch.nn.GELU
 output_neurons: 5000
 
 # Outputs
@@ -85,38 +83,9 @@ test_beam_size: 66
 lm_weight: 0.60
 ctc_weight_decode: 0.40
 
-log_softmax: !new:torch.nn.LogSoftmax
-    dim: -1
+n_warmup_steps: 25000
 
-ctc_cost: !name:trainer.losses.ctc_loss
-    blank_index: !ref <blank_index>
-    reduction: !ref <loss_reduction>
-
-seq_cost: !name:trainer.losses.kldiv_loss
-    label_smoothing: !ref <label_smoothing>
-    reduction: !ref <loss_reduction>
-
-noam_annealing: !new:trainer.schedulers.NoamScheduler
-    lr_initial: !ref <lr_adam>
-    n_warmup_steps: 25000
-    #model_size: !ref <d_model>
-
-# checkpointer: !new:utils.checkpoints.Checkpointer
-#     checkpoints_dir: !ref <save_folder>
-#     recoverables:
-#         model: !ref <model>
-#         noam_scheduler: !ref <noam_annealing>
-#         normalizer: !ref <normalize>
-#         counter: !ref <epoch_counter>
-
-epoch_counter: !new:utils.epoch_loop.EpochCounter
-    limit: !ref <number_of_epochs>
-
-normalize: !new:data.processing.features.InputNormalization
-    norm_type: global
-    update_until_epoch: 4
-
-augmentation: !new:data.augment.SpecAugment
+augmentation:
     time_warp: False
     time_warp_window: 5
     time_warp_mode: bicubic
@@ -130,13 +99,10 @@ augmentation: !new:data.augment.SpecAugment
 
 speed_perturb: True
 
-compute_features: !new:data.features.Fbank
+compute_features:
     sample_rate: !ref <sample_rate>
     n_fft: !ref <n_fft>
     n_mels: !ref <n_mels>
-
-error_rate_computer: !name:utils.metric_stats.ErrorRateStats
-acc_computer: !name:utils.Accuracy.AccuracyStats
 
 lm_model_path: !ref <save_folder>/lm.ckpt
 tokenizer_path: !ref <save_folder>/tokenizer.ckpt
