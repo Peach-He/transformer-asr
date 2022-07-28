@@ -2,7 +2,6 @@ import torch
 from torch import nn
 from typing import Optional
 from model.module.linear import Linear
-from model.module.containers import ModuleList
 from model.Transformer import (
     TransformerBase,
     get_lookahead_mask,
@@ -109,7 +108,7 @@ class TransformerASR(TransformerBase):
             causal=causal,
         )
 
-        self.custom_src_module = ModuleList(
+        self.custom_src_module = nn.ModuleList([
             Linear(
                 input_size=input_size,
                 n_neurons=d_model,
@@ -117,10 +116,10 @@ class TransformerASR(TransformerBase):
                 combine_dims=False,
             ),
             torch.nn.Dropout(dropout),
-        )
-        self.custom_tgt_module = ModuleList(
+        ])
+        self.custom_tgt_module = nn.ModuleList([
             NormalizedEmbedding(d_model, tgt_vocab)
-        )
+        ])
 
         # reset parameters using xavier_normal_
         self._init_params()
@@ -151,7 +150,8 @@ class TransformerASR(TransformerBase):
             tgt_mask,
         ) = self.make_masks(src, tgt, wav_len, pad_idx=pad_idx)
 
-        src = self.custom_src_module(src)
+        for layer in self.custom_src_module:
+            src = layer(src)
         # add pos encoding to queries if are sinusoidal ones else
         if self.attention_type == "RelPosMHAXL":
             pos_embs_encoder = self.positional_encoding(src)
@@ -165,8 +165,9 @@ class TransformerASR(TransformerBase):
             src_key_padding_mask=src_key_padding_mask,
             pos_embs=pos_embs_encoder,
         )
-
-        tgt = self.custom_tgt_module(tgt)
+        
+        for layer in self.custom_tgt_module:
+            tgt = layer(tgt)
 
         if self.attention_type == "RelPosMHAXL":
             # use standard sinusoidal pos encoding in decoder
@@ -236,7 +237,8 @@ class TransformerASR(TransformerBase):
         if enc_len is not None:
             src_key_padding_mask = (1 - length_to_mask(enc_len)).bool()
 
-        tgt = self.custom_tgt_module(tgt)
+        for layer in self.custom_tgt_module:
+            tgt = layer(tgt)
         if self.attention_type == "RelPosMHAXL":
             # we use fixed positional encodings in the decoder
             tgt = tgt + self.positional_encoding_decoder(tgt)
@@ -285,7 +287,8 @@ class TransformerASR(TransformerBase):
                 > abs_len[:, None]
             )
 
-        src = self.custom_src_module(src)
+        for layer in self.custom_src_module:
+            src = layer(src)
         if self.attention_type == "RelPosMHAXL":
             pos_embs_source = self.positional_encoding(src)
 

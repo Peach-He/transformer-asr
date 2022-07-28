@@ -3,7 +3,6 @@ from torch import nn
 
 from model.module.linear import Linear
 from model.module.normalization import LayerNorm
-from model.module.containers import ModuleList
 from model.Transformer import (
     TransformerBase,
     get_lookahead_mask,
@@ -82,11 +81,11 @@ class TransformerLM(TransformerBase):
                 input_size=self.d_embedding, n_neurons=d_model
             )
 
-        self.output_proj = ModuleList(
+        self.output_proj = nn.ModuleList([
             Linear(input_size=d_model, n_neurons=d_model),
             LayerNorm(d_model, eps=1e-6),
             Linear(input_size=d_model, n_neurons=vocab),
-        )
+        ])
 
         self.num_encoder_layers = num_encoder_layers
         self.num_decoder_layers = num_decoder_layers
@@ -131,7 +130,9 @@ class TransformerLM(TransformerBase):
                     tgt_key_padding_mask=src_key_padding_mask,
                 )
 
-        pred = self.output_proj(encoder_out)
+        pred = encoder_out
+        for layer in self.output_proj:
+            pred = layer(pred)
         return pred
 
     def _reset_params(self):
