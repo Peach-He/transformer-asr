@@ -16,7 +16,7 @@ from model.module.linear import Linear
 from data.processing.features import InputNormalization
 from utils.checkpoints import Checkpointer
 from model.TransformerLM import TransformerLM
-from model.decoders.seq2seq import S2STransformerBeamSearch
+from model.decoders.seq2seq import S2STransformerBeamSearch, batch_filter_seq2seq_output
 from trainer.losses import ctc_loss, kldiv_loss
 from trainer.schedulers import NoamScheduler
 from data.augment import SpecAugment
@@ -109,7 +109,9 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher, feat_proc):
             pred = model["seq_lin"](pred)
             p_seq = pred.log_softmax(dim=-1)
 
-            hyps, _ = searcher(enc_out.detach(), wav_lens)
+            # hyps, _ = searcher(enc_out.detach(), wav_lens)
+            v, k = p_seq.max(0)
+            hyps = batch_filter_seq2seq_output(k, hparams["eos_index"])
 
             ids = batch.id
             tokens_eos, tokens_eos_lens = batch.tokens_eos
@@ -126,7 +128,7 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher, feat_proc):
 
             eval_loss = loss.detach().cpu()
             avg_valid_loss = update_average(eval_loss, avg_valid_loss, step)
-            logger.info(f"epoch: {epoch}, step: {step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, loss: {eval_loss}, avg_loss: {avg_valid_loss:.4f}")
+            # logger.info(f"epoch: {epoch}, step: {step}|{total_step}, time: {(time.time()-step_start_time):.2f}s, loss: {eval_loss}, avg_loss: {avg_valid_loss:.4f}")
 
         acc = acc_metric.summarize()
         wer = wer_metric.summarize("error_rate")
