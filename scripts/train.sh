@@ -13,7 +13,7 @@ data_folder="/home/vmagent/app/dataset/LibriSpeech"
 # dev_splits="dev-clean"
 # test_splits="test-clean test-other"
 skip_prep=false
-train_csv="$data_folder/train.csv"
+train_csv="$data_folder/train-clean-100.csv"
 valid_csv="$data_folder/dev-clean.csv"
 test_csv="$data_folder/test-clean.csv $data_folder/test-other.csv"
 
@@ -32,4 +32,5 @@ args="--seed $seed \
   --tokenizer_ckpt $tokenizer_ckpt"
 
 python train.py --param_file config/transformer.yaml --device=cpu $args
+# python -m intel_extension_for_pytorch.cpu.launch train.py --param_file config/transformer.yaml --device=cpu $args
 # python -m torch.distributed.launch --nproc_per_node 2 train.py --param_file config/transformer.yaml --device=cpu $args --distributed_launch=True --distributed_backend=gloo

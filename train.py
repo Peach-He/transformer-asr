@@ -110,8 +110,8 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher, feat_proc):
             p_seq = pred.log_softmax(dim=-1)
 
             # hyps, _ = searcher(enc_out.detach(), wav_lens)
-            v, k = p_seq.max(0)
-            hyps = batch_filter_seq2seq_output(k, hparams["eos_index"])
+            # v, k = p_seq.max(0)
+            # hyps = batch_filter_seq2seq_output(k, hparams["eos_index"])
 
             ids = batch.id
             tokens_eos, tokens_eos_lens = batch.tokens_eos
@@ -121,7 +121,7 @@ def evaluate(model, valid_set, epoch, hparams, tokenizer, searcher, feat_proc):
             loss_ctc = ctc_loss(p_ctc, tokens, wav_lens, tokens_lens, blank_index=hparams["blank_index"], reduction=hparams["loss_reduction"]).sum()
 
             loss = (hparams["ctc_weight"] * loss_ctc + (1 - hparams["ctc_weight"]) * loss_seq)
-            predicted_words = [tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in hyps]
+            predicted_words = [tokenizer.decode_ids(utt_seq.tolist()).split(" ") for utt_seq in p_seq.argmax(-1)]
             target_words = [wrd.split(" ") for wrd in batch.wrd]
             wer_metric.append(ids, predicted_words, target_words)
             acc_metric.append(p_seq, tokens_eos, tokens_eos_lens)
